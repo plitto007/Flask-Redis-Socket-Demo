@@ -1,5 +1,7 @@
+import json
 import time
 import gevent.monkey
+import redis.client
 
 gevent.monkey.patch_all()
 from flask import Flask, render_template
@@ -16,9 +18,9 @@ values = {
     'slider1': 25,
     'slider2': 0,
 }
-REDIS_HOST = "redis"
+REDIS_HOST = "localhost"
 REDIS_PORT = 6379
-redis_client = Redis(host='redis', port=6379)
+redis_client = Redis(host='localhost', port=REDIS_PORT)
 
 
 @app.route('/')
@@ -33,21 +35,68 @@ def test_connect():
     emit('after connect', {'data': 'Lets dance'})
 
 
-@socketio.on('subscribe/<token_id>/<wall_id>')
-def subscribe(message):
-    print('event come: {}'.format(message))
-    count = 0
-    while (True):
-        count += 1
+@socketio.on("push_progress")
+def update_progress(data):
+    """
+    Update progress for a wall
+    {
+        "wall_id":1,
+        "progress":100
+    }
+    :param message:
+    :return:
+    """
+    try:
+        wall_id = data.get('wall_id')
+        progress = int(data.get('progress'))
+        print('progress udate: {}'.format(progress))
+        redis_client.publish(wall_id, progress)
+    except Exception as e:
+        print('error on push progress')
+        print(e)
+
+
+@socketio.on('subscribe')
+def subscribe(data):
+    """
+    Call from client
+    :param data:
+    :param message:
+    :return:
+    """
+    ""
+    try:
+        print('subscribe: {}'.format(data))
+        token = data.get("token")
+        wall_id = data.get("wall_id")
+        if not token:
+            raise Exception("Invalid token")
+        if not wall_id:
+            raise Exception("Invalid wall_id")
+    except Exception as e:
+        print("Wrong format data")
+        return
+    token = data.get("token")
+    ok = validate_session_token(token)
+    if not ok:
+        print("Invalid session token")
+        return
+
+    pub = redis_client.pubsub()
+    pub.subscribe(wall_id)
+    while True:
         socketio.sleep(0.1)
-        if count > 100:
-            return
-        result = {"progress": count}
-        print(f'emit progress: {count}')
-        emit('progress_update', result)
+        message = get_redis_message(pub)
+        if message:
+            print('message in pub: {}'.format(message))
+            emit('progress_update', message)
+    # for message in pub.listen():
+    #     print('message in pub: {}'.format(message))
+    #     if message:
+    #         emit('progress_update', message)
 
 
-@app.route('generate_token')
+@app.route('/generate_token')
 def generate_token():
     """
     Generate a valid token, and save it to redis data
@@ -59,8 +108,7 @@ def generate_token():
 
 
 def get_redis_message(pub):
-    data = pub_item.get_message()
-    LOG.info(data)
+    data = pub.get_message()
     if data:
         message = data['data']
         if message and message != 1:
@@ -73,13 +121,31 @@ def save_value_key(key, data, ttl=1000000):
         redis_client.set(key, data, ttl)
         return True
     except Exception as e:
+        print('write redis failed')
+        print(e)
         return False
+
+
+def get_value_key(key):
+    try:
+        data = redis_client.get(key)
+        return data
+    except Exception as e:
+        return None
 
 
 def generate_random_token():
     from uuid import uuid4
     rand_token = str(uuid4())
     return rand_token
+
+
+def validate_session_token(token):
+    data = get_value_key(token)
+    print(data)
+    if data:
+        return True
+    return False
 
 
 if __name__ == '__main__':
